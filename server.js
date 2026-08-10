@@ -6,29 +6,17 @@ const jwt = require('jsonwebtoken');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 const { v4: uuidv4 } = require('uuid');
+const { Readable } = require('stream');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
-const SERVER_IP = process.env.SERVER_IP || 'localhost';
-const FRONTEND_PORT = process.env.FRONTEND_PORT || '3000';
 
-// Middleware - 动态CORS配置
-const allowedOrigins = [
-  `http://localhost:${FRONTEND_PORT}`,
-  `http://127.0.0.1:${FRONTEND_PORT}`,
-  `http://${SERVER_IP}:${FRONTEND_PORT}`
-];
-
+// Middleware
 app.use(cors({ 
   origin: function(origin, callback) {
-    // 允许无origin的请求（如curl/Postman）
     if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1 || SERVER_IP === '*') {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
+    callback(null, true);
   },
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"], 
   allowedHeaders: ["Content-Type", "Authorization"], 
@@ -41,7 +29,7 @@ let db;
 
 async function initDB() {
   db = await open({
-    filename: '/tmp/api-hub-v2.db',
+    filename: '/var/lib/api-hub-v2/data.db',
     driver: sqlite3.Database
   });
 
@@ -348,7 +336,7 @@ app.post('/api/auth/login', async (req, res) => {
     const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "";
     await db.run("INSERT INTO login_logs (user_id, account, ip, message, status) VALUES (?, ?, ?, ?, ?)", 
       [user.id, account, ip, "登录成功", "SUCCESS"]).catch(e => console.error("Login log error:", e));
-    
+
     res.json({ token, user: { id: user.id, account: user.account, name: user.name, role_code: user.role_code, status: user.status, binding_status: user.binding_status }});
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
@@ -397,18 +385,38 @@ app.get('/api/admin/channels', authMiddleware, adminMiddleware, async (req, res)
 app.post('/api/admin/channels', authMiddleware, adminMiddleware, async (req, res) => {
   try {
     const { name, type = 0, key, keys, protocol_type, base_url, secret_key, weight = 1, priority = 0, models = '', group_name = 'default', test_model, rate = 1.0 } = req.body;
-    
-    // Validate and set defaults for NOT NULL fields
-    const safeBaseUrl = base_url || '';
+
+    const safeName = String(name || '').trim();
+    const safeBaseUrl = String(base_url || '').trim();
     const safeSecretKey = secret_key || '';
+    const keyString = String(keys || key || '')
+      .split(/\r?\n/)
+      .map(item => item.trim())
+      .filter(Boolean)
+      .join('\n');
+    const primaryKey = keyString.split('\n')[0] || '';
+
+    if (!safeName) {
+      return res.status(400).json({ error: '渠道名称不能为空' });
+    }
+    if (!safeBaseUrl) {
+      return res.status(400).json({ error: 'Base URL 不能为空' });
+    }
+    try {
+      new URL(safeBaseUrl);
+    } catch {
+      return res.status(400).json({ error: 'Base URL 格式不正确' });
+    }
+    if (!primaryKey) {
+      return res.status(400).json({ error: 'API Key 不能为空，请先配置上游渠道密钥' });
+    }
     
     const id = uuidv4();
-    const keyString = keys || key;
     
     await db.run(`
       INSERT INTO inf_channels (id, name, type, key, keys, protocol_type, base_url, secret_key, weight, priority, models, group_name, test_model, status, rate)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-    `, [id, name, type, key, keyString, protocol_type, safeBaseUrl, safeSecretKey, weight, priority, models, group_name, test_model, rate]);
+    `, [id, safeName, type, primaryKey, keyString, protocol_type || 'OPENAI_COMPATIBLE', safeBaseUrl, safeSecretKey, weight, priority, models, group_name, test_model, rate]);
     
     // Create abilities
     if (models) {
@@ -433,13 +441,35 @@ app.put('/api/admin/channels/:id', authMiddleware, adminMiddleware, async (req, 
     
     const updates = [];
     const params = [];
+
+    if (key !== undefined || keys !== undefined) {
+      const keyString = String(keys || key || '')
+        .split(/\r?\n/)
+        .map(item => item.trim())
+        .filter(Boolean)
+        .join('\n');
+      const primaryKey = keyString.split('\n')[0] || '';
+      if (!primaryKey) {
+        return res.status(400).json({ error: 'API Key 不能为空，请保留或填写有效密钥' });
+      }
+      updates.push('key = ?', 'keys = ?');
+      params.push(primaryKey, keyString);
+    }
+
+    if (base_url !== undefined) {
+      const safeBaseUrl = String(base_url || '').trim();
+      try {
+        new URL(safeBaseUrl);
+      } catch {
+        return res.status(400).json({ error: 'Base URL 格式不正确' });
+      }
+      updates.push('base_url = ?');
+      params.push(safeBaseUrl);
+    }
     
     if (name !== undefined) { updates.push('name = ?'); params.push(name); }
     if (type !== undefined) { updates.push('type = ?'); params.push(type); }
-    if (key !== undefined) { updates.push('key = ?'); params.push(key); }
-    if (keys !== undefined) { updates.push('keys = ?'); params.push(keys); }
     if (protocol_type !== undefined) { updates.push('protocol_type = ?'); params.push(protocol_type); }
-    if (base_url !== undefined) { updates.push('base_url = ?'); params.push(base_url); }
     if (secret_key !== undefined) { updates.push('secret_key = ?'); params.push(secret_key); }
     if (weight !== undefined) { updates.push('weight = ?'); params.push(weight); }
     if (priority !== undefined) { updates.push('priority = ?'); params.push(priority); }
@@ -658,10 +688,32 @@ app.get('/api/models', async (req, res) => {
 app.post('/api/admin/models', authMiddleware, adminMiddleware, async (req, res) => {
   try {
     const { model_id, name, type = 'TEXT', tags, description, input_price = 0, output_price = 0, source_channel = 'Manual' } = req.body;
+    const safeModelId = String(model_id || '').trim();
+    const safeName = String(name || safeModelId).trim();
+    const safeSourceChannel = String(source_channel || '').trim();
+
+    if (!safeModelId || !safeName) {
+      return res.status(400).json({ error: '模型 ID 和名称不能为空' });
+    }
+    if (!safeSourceChannel || safeSourceChannel === 'Manual') {
+      return res.status(400).json({ error: '必须选择一个已配置 API Key 的可用渠道' });
+    }
+
+    const sourceChannel = await db.get(
+      'SELECT * FROM inf_channels WHERE name = ? AND status = 1',
+      [safeSourceChannel]
+    );
+    if (!sourceChannel) {
+      return res.status(400).json({ error: '所选渠道不存在或未启用' });
+    }
+    if (!getChannelApiKey(sourceChannel)) {
+      return res.status(400).json({ error: '所选渠道未配置 API Key' });
+    }
+
     const id = uuidv4();
     const tagsStr = Array.isArray(tags) ? tags.join(',') : (tags || '');
     await db.run(`INSERT INTO inf_models (id, model_id, name, source_channel, type, tags, description, input_price, output_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, 
-      [id, model_id, name, source_channel, type, tagsStr, description, input_price, output_price]);
+      [id, safeModelId, safeName, safeSourceChannel, type, tagsStr, description, input_price, output_price]);
     const model = await db.get('SELECT * FROM inf_models WHERE id = ?', [id]);
     res.status(201).json(model);
   } catch (err) {
@@ -676,7 +728,18 @@ app.put('/api/admin/models/:id', authMiddleware, adminMiddleware, async (req, re
     const updates = [];
     const params = [];
     
-    ['name', 'description', 'input_price', 'output_price', 'enabled_status'].forEach(field => {
+    if (req.body.source_channel !== undefined) {
+      const safeSourceChannel = String(req.body.source_channel || '').trim();
+      const sourceChannel = await db.get(
+        'SELECT * FROM inf_channels WHERE name = ? AND status = 1',
+        [safeSourceChannel]
+      );
+      if (!sourceChannel || !getChannelApiKey(sourceChannel)) {
+        return res.status(400).json({ error: '必须选择一个已配置 API Key 的可用渠道' });
+      }
+    }
+
+    ['model_id', 'name', 'description', 'input_price', 'output_price', 'enabled_status', 'source_channel'].forEach(field => {
       if (req.body[field] !== undefined) {
         updates.push(`${field} = ?`);
         params.push(req.body[field]);
@@ -749,17 +812,8 @@ app.post('/api/admin/models/:id/test', authMiddleware, adminMiddleware, async (r
       }
     }
     
-    // Method 4: Last resort - try any tested channel
     if (!channel) {
-      channel = await db.get('SELECT * FROM inf_channels WHERE status = 1 AND response_time > 0 ORDER BY response_time ASC LIMIT 1');
-    }
-    
-    if (!channel) {
-      return res.json({ success: false, error: 'No available channel found', response_time: 0 });
-    }
-    
-    if (!channel) {
-      return res.json({ success: false, error: 'Channel not available', response_time: 0 });
+      return res.json({ success: false, error: '模型未关联可用渠道，请先选择并测试渠道', response_time: 0 });
     }
     
     const startTime = Date.now();
@@ -771,7 +825,10 @@ app.post('/api/admin/models/:id/test', authMiddleware, adminMiddleware, async (r
       const testUrl = new URL('/v1/models', channel.base_url);
       const client = testUrl.protocol === 'https:' ? https : http;
       
-      const key = channel.keys ? channel.keys.split('\n')[0] : channel.key;
+      const key = getChannelApiKey(channel);
+      if (!key) {
+        return res.json({ success: false, error: '关联渠道未配置 API Key', response_time: 0 });
+      }
       
       const options = {
         hostname: testUrl.hostname,
@@ -960,6 +1017,17 @@ function buildUpstreamUrl(baseUrl, path) {
   return url + path;
 }
 
+function getChannelApiKey(channel) {
+  if (!channel) return '';
+
+  const candidates = [];
+  if (channel.keys) candidates.push(...String(channel.keys).split(/\r?\n/));
+  if (channel.key) candidates.push(channel.key);
+  if (channel.secret_key) candidates.push(channel.secret_key);
+
+  return candidates.map(item => String(item).trim()).find(Boolean) || '';
+}
+
 // Validate API key or JWT token middleware
 const validateApiKeyOrToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -1019,8 +1087,18 @@ app.get('/v1/models', validateApiKeyOrToken, async (req, res) => {
 
 // Chat completions proxy
 app.post('/v1/chat/completions', validateApiKeyOrToken, async (req, res) => {
+  const upstreamController = new AbortController();
+  const abortUpstream = () => upstreamController.abort();
+  req.once('aborted', abortUpstream);
+
   try {
     const { model, messages, stream = false } = req.body;
+
+    if (!model || !Array.isArray(messages)) {
+      return res.status(400).json({
+        error: { message: 'model 和 messages 为必填参数', type: 'invalid_request_error' }
+      });
+    }
     
     // First check inf_models to get source_channel (case-insensitive match)
     let modelInfo = await db.get('SELECT * FROM inf_models WHERE model_id = ? AND enabled_status = ?', [model, 'ENABLED']);
@@ -1042,18 +1120,63 @@ app.post('/v1/chat/completions', validateApiKeyOrToken, async (req, res) => {
     if (!channel) {
       return res.status(404).json({ error: { message: 'Channel not available for this model', type: 'invalid_request_error' } });
     }
+
+    const upstreamApiKey = getChannelApiKey(channel);
+    if (!upstreamApiKey) {
+      return res.status(502).json({ error: { message: '模型关联渠道未配置 API Key', type: 'upstream_configuration_error' } });
+    }
     
-    // Forward request to upstream
+    // Forward the complete OpenAI-compatible request body. This preserves
+    // tools, tool_choice, response_format, sampling and token-limit options.
+    const upstreamBody = { ...req.body, model: modelInfo.model_id, stream: Boolean(stream) };
     const response = await fetch(buildUpstreamUrl(channel.base_url, '/v1/chat/completions'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + channel.key
+        'Authorization': 'Bearer ' + upstreamApiKey
       },
-      body: JSON.stringify({ model, messages, stream })
+      body: JSON.stringify(upstreamBody),
+      signal: upstreamController.signal
     });
-    
-    const data = await response.json();
+
+    if (stream) {
+      res.status(response.status);
+      res.setHeader('Content-Type', response.headers.get('content-type') || 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', response.headers.get('cache-control') || 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders();
+
+      if (!response.body) {
+        return res.end();
+      }
+
+      const upstreamStream = Readable.fromWeb(response.body);
+      upstreamStream.on('error', (error) => {
+        if (!res.writableEnded) res.destroy(error);
+      });
+      res.once('close', () => {
+        if (!res.writableEnded) abortUpstream();
+      });
+      upstreamStream.pipe(res);
+      return;
+    }
+
+    const responseText = await response.text();
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch {
+      if (!response.ok) {
+        return res.status(response.status).json({
+          error: {
+            message: responseText.slice(0, 500) || `上游服务返回 HTTP ${response.status}`,
+            type: 'upstream_error'
+          }
+        });
+      }
+      return res.status(response.status).send(responseText);
+    }
     
     // Record usage if successful
     if (data.usage) {
@@ -1077,9 +1200,18 @@ app.post('/v1/chat/completions', validateApiKeyOrToken, async (req, res) => {
       );
     }
     
-    res.json(data);
+    res.status(response.status).json(data);
   } catch (err) {
-    res.status(500).json({ error: { message: err.message, type: 'server_error' } });
+    if (res.headersSent || res.writableEnded) return;
+    const aborted = err.name === 'AbortError';
+    res.status(aborted ? 499 : 502).json({
+      error: {
+        message: aborted ? '请求已取消' : `上游模型服务请求失败: ${err.message}`,
+        type: aborted ? 'request_cancelled' : 'upstream_error'
+      }
+    });
+  } finally {
+    req.off('aborted', abortUpstream);
   }
 });
 
@@ -1508,7 +1640,54 @@ app.post('/api/user/topup', authMiddleware, async (req, res) => {
 // ==================== Start Server ====================
 
 initDB().then(() => {
-  app.listen(PORT, () => {
+
+
+// ==================== Logs Routes (Added 2026-03-01) ====================
+
+// Get login logs
+app.get("/api/logs/login", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { page = 1, pageSize = 50, startDate, endDate } = req.query;
+    const offset = (page - 1) * pageSize;
+
+    let whereClause = "WHERE 1=1";
+    const params = [];
+
+    if (startDate) { whereClause += " AND DATE(created_at) >= ?"; params.push(startDate); }
+    if (endDate) { whereClause += " AND DATE(created_at) <= ?"; params.push(endDate); }
+
+    const total = await db.get(`SELECT COUNT(*) as count FROM login_logs ${whereClause}`, params);
+    const logs = await db.all(`SELECT * FROM login_logs ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...params, parseInt(pageSize), offset]);
+
+    res.json({ data: logs, total: total.count, page: parseInt(page), pageSize: parseInt(pageSize) });
+  } catch (err) {
+    console.error("Get login logs error:", err);
+    res.status(500).json({ error: "Failed to get login logs" });
+  }
+});
+
+// Get operation logs
+app.get("/api/logs/operation", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { page = 1, pageSize = 50, operationType } = req.query;
+    const offset = (page - 1) * pageSize;
+
+    let whereClause = "WHERE 1=1";
+    const params = [];
+
+    if (operationType) { whereClause += " AND operation_type = ?"; params.push(operationType); }
+
+    const total = await db.get(`SELECT COUNT(*) as count FROM operation_logs ${whereClause}`, params);
+    const logs = await db.all(`SELECT * FROM operation_logs ${whereClause} ORDER BY operation_time DESC LIMIT ? OFFSET ?`, [...params, parseInt(pageSize), offset]);
+
+    res.json({ data: logs, total: total.count, page: parseInt(page), pageSize: parseInt(pageSize) });
+  } catch (err) {
+    console.error("Get operation logs error:", err);
+    res.status(500).json({ error: "Failed to get operation logs" });
+  }
+});
+
+app.listen(PORT, () => {
     console.log(`AI API Hub V2 running on port ${PORT}`);
     console.log(`Health check: http://localhost:${PORT}/health`);
   });

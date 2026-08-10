@@ -942,12 +942,7 @@ function copyFullKey(btn, keyId) {
     </div>
 
     <script>
-        // API_URL 配置：优先使用 window.API_HUB_CONFIG，否则自动推断
-        const API_URL = (typeof window.API_HUB_CONFIG !== 'undefined' && window.API_HUB_CONFIG.apiUrl) 
-            ? window.API_HUB_CONFIG.apiUrl 
-            : (window.location.hostname === 'localhost' 
-                ? 'http://localhost:8080' 
-                : `http://${window.location.hostname}:8080`);
+        const API_URL = window.location.protocol + '//' + window.location.hostname + ':8080';
         let token = localStorage.getItem('token') || '';
         let currentModal = null;
 
@@ -2221,8 +2216,8 @@ function copyFullKey(btn, keyId) {
             document.querySelectorAll('[id^="tab-"]').forEach(el => {
                 el.classList.remove('border-[#0055FF]', 'bg-[#F4F5F7]');
                 el.classList.add('border-transparent');
-                el.querySelector('.font-mono').classList.remove('text-[#0055FF]');
-                el.querySelector('.font-mono').classList.add('text-[#1A1D21]/60');
+                const fontMono1 = el.querySelector('.font-mono'); if (fontMono1) fontMono1.classList.remove('text-[#0055FF]');
+                const fontMono2 = el.querySelector('.font-mono'); if (fontMono2) fontMono2.classList.add('text-[#1A1D21]/60');
             });
             
             // Show selected tab
@@ -2230,8 +2225,8 @@ function copyFullKey(btn, keyId) {
             const tabEl = document.getElementById('tab-' + tab);
             tabEl.classList.add('border-[#0055FF]', 'bg-[#F4F5F7]');
             tabEl.classList.remove('border-transparent');
-            tabEl.querySelector('.font-mono').classList.add('text-[#0055FF]');
-            tabEl.querySelector('.font-mono').classList.remove('text-[#1A1D21]/60');
+            const tabFontMono1 = tabEl.querySelector('.font-mono'); if (tabFontMono1) tabFontMono1.classList.add('text-[#0055FF]');
+            const tabFontMono2 = tabEl.querySelector('.font-mono'); if (tabFontMono2) tabFontMono2.classList.remove('text-[#1A1D21]/60');
             
             // Load settings when switching to specific tabs
             if (tab === 'basic') {
@@ -2571,15 +2566,15 @@ function copyFullKey(btn, keyId) {
                 <div class="space-y-4">
                     <div>
                         <label class="font-mono text-xs uppercase text-[#1A1D21]/60">渠道名称</label>
-                        <input type="text" id="chName" class="w-full bg-white border border-[#D1D5DB] px-3 py-2 mt-1 focus:outline-none focus:border-[#0055FF]">
+                        <input type="text" id="chName" required class="w-full bg-white border border-[#D1D5DB] px-3 py-2 mt-1 focus:outline-none focus:border-[#0055FF]">
                     </div>
                     <div>
                         <label class="font-mono text-xs uppercase text-[#1A1D21]/60">Base URL</label>
-                        <input type="text" id="chUrl" class="w-full bg-white border border-[#D1D5DB] px-3 py-2 mt-1 focus:outline-none focus:border-[#0055FF]">
+                        <input type="url" id="chUrl" required class="w-full bg-white border border-[#D1D5DB] px-3 py-2 mt-1 focus:outline-none focus:border-[#0055FF]">
                     </div>
                     <div>
                         <label class="font-mono text-xs uppercase text-[#1A1D21]/60">API Key</label>
-                        <input type="text" id="chKey" class="w-full bg-white border border-[#D1D5DB] px-3 py-2 mt-1 focus:outline-none focus:border-[#0055FF]">
+                        <input type="password" id="chKey" required autocomplete="new-password" placeholder="请输入上游 API Key" class="w-full bg-white border border-[#D1D5DB] px-3 py-2 mt-1 focus:outline-none focus:border-[#0055FF]">
                     </div>
                     <div>
                         <label class="font-mono text-xs uppercase text-[#1A1D21]/60">渠道描述</label>
@@ -2612,6 +2607,7 @@ function copyFullKey(btn, keyId) {
         let currentSourceChannel = null;
 
         async function showModelModal() {
+            currentSourceChannel = null;
             document.getElementById('modalTitle').textContent = '新建模型';
             document.getElementById('modalBody').innerHTML = `
                 <div class="space-y-4">
@@ -2667,7 +2663,9 @@ function copyFullKey(btn, keyId) {
                     headers: { 'Authorization': 'Bearer ' + token }
                 });
                 const data = await res.json();
-                modelChannelCache = (data.data || []).filter(c => c.response_time > 0);
+                modelChannelCache = (data.data || []).filter(c =>
+                    c.response_time > 0 && (c.key_list?.some(key => key.trim()) || String(c.key || '').trim())
+                );
                 
                 const select = document.getElementById('modelChannelSelect');
                 select.innerHTML = '<option value="">-- 选择已测试通过的渠道 --</option>' + 
@@ -2756,25 +2754,44 @@ function copyFullKey(btn, keyId) {
         async function saveModal() {
             if (currentModal === 'channel' || currentModal === 'channel-edit') {
                 const data = {
-                    name: document.getElementById('chName').value,
-                    base_url: document.getElementById('chUrl').value,
-                    key: document.getElementById('chKey').value,
+                    name: document.getElementById('chName').value.trim(),
+                    base_url: document.getElementById('chUrl').value.trim(),
+                    key: document.getElementById('chKey').value.trim(),
                     models: document.getElementById('chDesc').value,
                     weight: parseInt(document.getElementById('chWeight').value) || 1,
                     rate: parseFloat(document.getElementById('chRate').value) || 1.0
                 };
+                if (!data.name || !data.base_url || !data.key) {
+                    alert('渠道名称、Base URL 和 API Key 均为必填项');
+                    return;
+                }
+                try {
+                    new URL(data.base_url);
+                } catch {
+                    alert('Base URL 格式不正确');
+                    return;
+                }
                 const url = currentModal === 'channel-edit' ? `${API_URL}/api/admin/channels/${currentChannelId}` : `${API_URL}/api/admin/channels`;
                 const method = currentModal === 'channel-edit' ? 'PUT' : 'POST';
-                await fetch(url, {
+                const response = await fetch(url, {
                     method: method,
                     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
                     body: JSON.stringify(data)
                 });
+                const result = await response.json();
+                if (!response.ok) {
+                    alert(result.error || '保存渠道失败');
+                    return;
+                }
                 closeModal();
                 loadChannels();
             } else if (currentModal === 'model') {
                 // Batch publish selected models from channel
                 if (selectedModelIndices.size > 0 && fetchedModels.length > 0) {
+                    if (!currentSourceChannel || !(currentSourceChannel.key_list?.some(key => key.trim()) || String(currentSourceChannel.key || '').trim())) {
+                        alert('请选择已配置 API Key 的可用渠道');
+                        return;
+                    }
                     const inputPrice = parseFloat(document.getElementById('mIn').value) || 0;
                     const outputPrice = parseFloat(document.getElementById('mOut').value) || 0;
                     const sourceChannelName = currentSourceChannel ? currentSourceChannel.name : 'Manual';
@@ -2893,7 +2910,7 @@ function copyFullKey(btn, keyId) {
                     </div>
                     <div>
                         <label class="font-mono text-xs uppercase text-[#1A1D21]/60">API Key</label>
-                        <input type="text" id="chKey" value="${channel.key}" class="w-full bg-white border border-[#D1D5DB] px-3 py-2 mt-1 focus:outline-none focus:border-[#0055FF]">
+                        <input type="password" id="chKey" required autocomplete="current-password" value="${channel.key}" class="w-full bg-white border border-[#D1D5DB] px-3 py-2 mt-1 focus:outline-none focus:border-[#0055FF]">
                     </div>
                     <div>
                         <label class="font-mono text-xs uppercase text-[#1A1D21]/60">渠道描述</label>

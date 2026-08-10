@@ -12,6 +12,7 @@ English | [简体中文](./README_zh.md)
 - ✅ **API Key Management** - Personal API keys for users
 - ✅ **Model Playground** - Online testing experience center
 - ✅ **OpenAI-compatible API** - Drop-in replacement for OpenAI API
+- ✅ **Streaming & Agent Tools** - SSE streaming plus `tools` / `tool_choice` passthrough
 - ✅ **Dynamic IP Configuration** - Auto-detect server IP during deployment
 
 ## 🏗️ Architecture
