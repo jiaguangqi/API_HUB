@@ -99,7 +99,7 @@ API 请求
 
 ```bash
 # .env 文件
-JWT_SECRET=api-hub-v2-jiaguangqi-jwt-secret-2025
+JWT_SECRET=<使用 openssl rand -hex 32 生成的独立密钥>
 ```
 
 ⚠️ **重要**: JWT_SECRET 必须固定，否则服务器重启后所有 token 失效
@@ -305,7 +305,7 @@ npm install
 
 # 3. 配置环境变量
 cat > .env << 'EOF'
-JWT_SECRET=your-fixed-secret-key
+JWT_SECRET=<使用 openssl rand -hex 32 生成的独立密钥>
 EOF
 
 # 4. 启动后端服务
